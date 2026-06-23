@@ -116,13 +116,83 @@ def extract_busy_transit_hubs(df_stops_enriched, freq_threshold=400, eps_meters=
     return verified_hubs
 
 
+def geocode_yad2_addresses(df_yad2):
+    """
+    Convert Street Addresses from YAD2 into geographical coordinates (Lat, Long).
+    Uses the free OpenStreetMap Nomnatim API.
+    """
+    print("Starting Geocoding process for Yad2 addresses. This may take a while.")
+
+    # Initialize the geocoder with a custom user agent
+    geolocator = Nominatim(user_agent="jerusalem_transit_real_estate_research")
+    # Use RateLimiter to avoid hitting the API too fast (1 req per second)
+    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
+
+    # Create a full address string tailored for Jerusalem
+    df_yad2['full_address'] = df_yad2['street'] + \
+        ", " + df_yad2['neighborhood'] + ", " + df_yad2['city']
+
+    def get_coordinates(address):
+        try:
+            location = geocode(address)
+            if location:
+                return pd.Series((location.latitude, location.longitude))
+            return pd.Series((np.nan, np.nan))
+        except Exception as e:
+            return pd.Series((np.nan, np.nan))
+
+    # Apply the function and create new Lat and Long columns
+    df_yad2[['Lat', 'Long']] = df_yad2['full_address'].apply(get_coordinates)
+
+    # Drop rows where geocoding failed
+    df_yad2_clean = df_yad2.dropna(subset=['Lat', 'Long']).copy()
+
+    print(
+        f"Geocoding complete. Successfully geocoded {len(df_yad2_clean)} out of {len(df_yad2)} properties.")
+    return df_yad2_clean
+
+
+def calculate_distance_to_nearest_hub(df_properties, df_hubs):
+    """
+    Calculate the minimum Haversine distance from each propery to the nearest busy transit hub.
+    """
+    print("Calculating distances from properties to the nearest transit hubs.")
+
+    # Extract coordinates and convert degress to radians for the Haversine formula
+    prop_coords_rad = np.radians(df_properties[['Lat', 'Long']].values)
+    hub_coords_rad = np.radians(df_hubs[['Lat', 'Long']].values)
+
+    # Calculate pairwaise distances between all properties and all hubs
+    distance_matrix_rad = haversine_distances(prop_coords_rad, hub_coords_rad)
+
+    # Multiply by Earth's radius in meters to get actual physical distances
+    earth_rad_meters = 6371000
+    distance_matrix_meters = distance_matrix_rad * earth_rad_meters
+
+    # find the minimum distance for each property
+    min_distances = np.min(distance_matrix_meters, axis=1)
+
+    # Add the result as a new feature to the real estate dataframe
+    df_properties['Distance_To_Hub_Meters'] = min_distances
+
+    # Save the final analytical dataset
+    df_properties.to_csv('final_analytical_dataset.csv',
+                         index=False, encoding='utf-8-sig')
+    print("Successfully created 'final_analytical_dataset.csv' with distance features.")
+
+    return df_properties
+
+
 if __name__ == "__main__":
     df_jeru_stops, jlm_stops_ids, df_real_estate = load_and_prepare_data()
     df_enriched_transit = compute_transit_frequencies(
         df_jeru_stops, jlm_stops_ids)
     df_final_hubs = extract_busy_transit_hubs(
         df_enriched_transit, freq_threshold=450, eps_meters=150, min_samples=3)
+    df_yad2_geocoded = geocode_yad2_addresses(df_real_estate)
+    final_dataset = calculate_distance_to_nearest_hub(
+        df_yad2_geocoded, df_final_hubs)
 
     print("\n--- Pipeline Fully Completed ---")
-    print(df_final_hubs[['StationId', 'Lat', 'Long',
-          'Daily_Bus_Volume', 'Hub_Cluster_ID']].head())
+    print(final_dataset[['street', 'neighborhood', 'price',
+          'area_sqm', 'Distance_To_Hub_Meters']].head())
