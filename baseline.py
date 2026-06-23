@@ -1,71 +1,128 @@
-"""
-Project: A Needle in a Data Haystack
-Authors: Shir Inbar, Noa Ruiz, [Team Member 3 Name]
-Description: Analyzing the optimal distance between residential properties in Jerusalem and public transportation hubs.
-"""
-
+import os
+import time
 import pandas as pd
 import numpy as np
+from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
+from sklearn.metrics.pairwise import haversine_distances
+import kagglehub
+from sklearn.cluster import DBSCAN
 
-# ==========================================
-# Phase 1: Data & Feature Engineering
-# ==========================================
 
-def load_and_clean_real_estate(file_path):
+def load_and_prepare_data():
     """
-    TODO: 
-    1. Load Yad2 residential listings.
-    2. Filter outliers (e.g., the 10-room property price spike).
-    3. Handle any data biases.
+    Load the pre-filtered Jerusalem transit stations and fetch real estate data from Yad2 (via Kaggle).
     """
-    pass
+    print("Loading Jerusalem stations data from stations.csv")
+    df_jerusalem_stops = pd.read_csv('stations.csv', encoding='utf-8')
 
-def process_gtfs_data(file_path):
-    """
-    TODO:
-    1. Extract relevant bus schedule data from the TXT file.
-    2. Calculate daily bus frequencies per station.
-    """
-    pass
+    # Strip white spaces and string encapsulations
+    for col in df_jerusalem_stops.select_dtypes(include=['object', 'string']).columns:
+        df_jerusalem_stops[col] = df_jerusalem_stops[col].astype(
+            str).str.strip('"').str.strip()
 
-def calculate_aerial_distances(properties_df, stations_df):
-    """
-    TODO:
-    Calculate Haversine distance between real estate coords and station coords.
-    """
-    pass
+    jerusalem_stop_ids = set(df_jerusalem_stops['StationId'].astype(str))
+    print(f"Successfully loaded {len(df_jerusalem_stops)} bus stations.")
 
-# ==========================================
-# Phase 2: Solution & Modeling
-# ==========================================
+    # Fetching the Hebrew Yad2 dataset directly from Kaggle servers
+    print("Downloading updated real estate listring from Kaggle.")
+    path = kagglehub.dataset_download(
+        "amirjayousi/yad2-real-estate-listings-hebrew")
+    yad2_file_path = os.path.join(path, "cleaned_yad2_data.csv")
+    df_yad2 = pd.read_csv(yad2_file_path)
 
-def train_baseline_model(X, y):
-    """
-    TODO:
-    Implement a simple baseline model (e.g., Linear Regression)
-    to compare against the advanced solution.
-    """
-    pass
+    for col in df_yad2.select_dtypes(include=['object']).columns:
+        df_yad2[col] = df_yad2[col].astype(str).str.strip('"').str.strip()
 
-def train_advanced_model(X, y):
-    """
-    TODO:
-    Implement the main predictive algorithm (e.g., Deep Learning / Neural Network)
-    that identifies the non-linear "optimal distance" sweet spot.
-    """
-    pass
+    df_yad2_jerusalem = df_yad2[df_yad2['city'] == 'ירושלים'].copy()
+    df_yad2_jerusalem.to_csv('yad2_jerusalem.csv',
+                             index=False, encoding='utf-8-sig')
+    print(f"Saved filtered real estate file to 'yad2_jerusalem.csv'.")
 
-# ==========================================
-# Phase 3: Evaluation & Visualizations
-# ==========================================
+    return df_jerusalem_stops, jerusalem_stop_ids, df_yad2_jerusalem
 
-def evaluate_models(y_true, y_pred_baseline, y_pred_advanced):
+
+def compute_transit_frequencies(df_jerusalem_stops, jerusalem_stop_ids):
     """
-    TODO:
-    Calculate metrics (like RMSE or MAE) to prove the advanced model's success.
+    Parse the GTFS stop_times.txt using chunking to calculate daily bus volume per station
     """
-    pass
+    print("Scanning stop_times.txt sequentially...")
+    stop_counts = {}
+    chunk_size = 100000
+
+    # Iterate through the large text file line-by-line using context chunks
+    chunk_iterator = pd.read_csv(
+        'stop_times.txt', chunksize=chunk_size, dtype={'stop_id': str})
+    for chunk in chunk_iterator:
+        chunk['stop_id'] = chunk['stop_id'].astype(
+            str).str.strip('"').str.strip()
+        # Filter for rows that match our established Jerusalem Station IDs
+        jerusalem_rows = chunk[chunk['stop_id'].isin(jerusalem_stop_ids)]
+        for stop_id in jerusalem_rows['stop_id']:
+            stop_counts[stop_id] = stop_counts.get(stop_id, 0) + 1
+
+    # Convert the frequency dictionary into a structured dataframe
+    df_frequencies = pd.DataFrame(list(stop_counts.items()), columns=[
+                                  'StationId', 'Daily_Bus_Volume'])
+
+    # Type normalization before executing the merge
+    df_frequencies['StationId'] = df_frequencies['StationId'].astype(int)
+    df_jerusalem_stops['StationId'] = df_jerusalem_stops['StationId'].astype(
+        int)
+
+    # Join to merge coordinates with frequency metrics
+    df_stops_enriched = pd.merge(
+        df_jerusalem_stops, df_frequencies, on='StationId', how='left')
+    df_stops_enriched['Daily_Bus_Volume'] = df_stops_enriched['Daily_Bus_Volume'].fillna(
+        0).astype(int)
+
+    df_stops_enriched.to_csv(
+        'jerusalem_stops_with_frequency.csv', index=False, encoding='utf-8-sig')
+    print("Saved merged transit records to 'jerusalem_stops_with_frequencies.csv'.")
+
+    return df_stops_enriched
+
+
+def extract_busy_transit_hubs(df_stops_enriched, freq_threshold=400, eps_meters=200, min_samples=3):
+    """
+    Applying DBSCAN to isolate and extract dense spatial clusters of high-volume transit hubs, eliminating low traffic
+    """
+    print("Executing DBSCAN to discover dense geographical transit hubs.")
+
+    # Filter using the frequency metric to mitigate right-skewed data bias
+    busy_nodes = df_stops_enriched[df_stops_enriched['Daily_Bus_Volume']
+                                   >= freq_threshold].copy()
+
+    if busy_nodes.empty:
+        print("Error: No transit stations meet the defines frequency threshold.")
+        return busy_nodes
+
+    coords = busy_nodes[['Lat', 'Long']].values
+    coords_rad = np.radians(coords)
+
+    earth_rad = 6371000
+    eps_rad = eps_meters / earth_rad
+
+    dbscan = DBSCAN(eps=eps_rad, min_samples=min_samples,
+                    algorithm='ball_tree', metric='haversine')
+    busy_nodes['Hub_Cluster_ID'] = dbscan.fit_predict(coords_rad)
+
+    verified_hubs = busy_nodes[busy_nodes['Hub_Cluster_ID'] != -1].copy()
+
+    distinct_hubs_count = len(set(verified_hubs['Hub_Cluster_ID']))
+    print(
+        f"Discovered {distinct_hubs_count} distinct high-volume transit hubs in Jerusalem.")
+
+    return verified_hubs
+
 
 if __name__ == "__main__":
-    print("Starting the A Needle in a Data Haystack Pipeline...")
-    # Entry point for the scripts
+    df_jeru_stops, jlm_stops_ids, df_real_estate = load_and_prepare_data()
+    df_enriched_transit = compute_transit_frequencies(
+        df_jeru_stops, jlm_stops_ids)
+    df_final_hubs = extract_busy_transit_hubs(
+        df_enriched_transit, freq_threshold=450, eps_meters=150, min_samples=3)
+
+    print("\n--- Pipeline Fully Completed ---")
+    print(df_final_hubs[['StationId', 'Lat', 'Long',
+          'Daily_Bus_Volume', 'Hub_Cluster_ID']].head())
