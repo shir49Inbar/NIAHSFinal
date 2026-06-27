@@ -1,5 +1,4 @@
 import os
-import time
 import pandas as pd
 import numpy as np
 from geopy.geocoders import Nominatim
@@ -7,6 +6,8 @@ from geopy.extra.rate_limiter import RateLimiter
 from sklearn.metrics.pairwise import haversine_distances
 import kagglehub
 from sklearn.cluster import DBSCAN
+from matplotlib import pyplot as plt
+import seaborn as sns
 
 
 def load_and_prepare_data():
@@ -83,7 +84,7 @@ def compute_transit_frequencies(df_jerusalem_stops, jerusalem_stop_ids):
     return df_stops_enriched
 
 
-def extract_busy_transit_hubs(df_stops_enriched, freq_threshold=400, eps_meters=200, min_samples=3):
+def extract_busy_transit_hubs(df_stops_enriched, freq_threshold=400, eps_meters=300, min_samples=15):
     """
     Applying DBSCAN to isolate and extract dense spatial clusters of high-volume transit hubs, eliminating low traffic
     """
@@ -183,12 +184,49 @@ def calculate_distance_to_nearest_hub(df_properties, df_hubs):
     return df_properties
 
 
+def visualize_dbscan_clusters(df_stops_enriched, df_dbscan_hubs, freq_threshold=400):
+    """
+    Visualize the transit hubs identified by the DBSCAN algorithm.
+    Shows the clustered hubs in colors and the rejected 'noise' stations in gray.
+    """
+    print("Generating DBSCAN clusters visualization")
+
+    # Get all busy stations that were evaluated by the algorithm.
+    busy_nodes = df_stops_enriched[df_stops_enriched['Daily_Bus_Volume']
+                                   >= freq_threshold].copy()
+
+    # Identify the noise nodes (stations that were evaluated but rejected by DBSCAN)
+    noise_nodes = busy_nodes[~busy_nodes['StationId'].isin(
+        df_dbscan_hubs['StationId'])]
+
+    plt.figure(figsize=(12, 10))
+    plt.gca().set_aspect(1 / np.cos(np.radians(31.77)))
+
+    plt.scatter(noise_nodes['Long'], noise_nodes['Lat'], c='lightgray',
+                s=30, alpha=0.6, label='Noise (Unclustered Stations)')
+    sns.scatterplot(data=df_dbscan_hubs, x='Long', y='Lat', hue='Hub_Cluster_ID',
+                    palette='tab10', s=120, alpha=0.9, edgecolor='black', legend='full')
+    plt.title('DBSCAN Clustering: Identified Major Transit Hubs in Jerusalem',
+              fontsize=16, fontweight='bold', pad=20)
+    plt.xlabel('Longitude', fontsize=12)
+    plt.ylabel('Latitude', fontsize=12)
+
+    plt.legend(title='DBSCAN Cluster ID',
+               bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, linestyle='--', alpha=0.5)
+
+    plt.savefig('visualization_dbscan_hubs.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("Saved 'visualization_dbscan_hubs.png'.")
+
+
 if __name__ == "__main__":
     df_jeru_stops, jlm_stops_ids, df_real_estate = load_and_prepare_data()
     df_enriched_transit = compute_transit_frequencies(
         df_jeru_stops, jlm_stops_ids)
     df_final_hubs = extract_busy_transit_hubs(
-        df_enriched_transit, freq_threshold=450, eps_meters=150, min_samples=3)
+        df_enriched_transit, freq_threshold=400, eps_meters=300, min_samples=5)
+    visualize_dbscan_clusters(df_enriched_transit, df_final_hubs)
     df_yad2_geocoded = geocode_yad2_addresses(df_real_estate)
     final_dataset = calculate_distance_to_nearest_hub(
         df_yad2_geocoded, df_final_hubs)

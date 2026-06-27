@@ -6,6 +6,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.metrics import mean_squared_error
 from sklearn.metrics.pairwise import haversine_distances
+from sklearn.linear_model import LinearRegression
+import os
 
 
 def train_and_evaluate_model(file_path='final_analytical_dataset.csv'):
@@ -18,6 +20,9 @@ def train_and_evaluate_model(file_path='final_analytical_dataset.csv'):
     # Clean missing values in our target and feature column
     df = df.dropna(subset=['price_per_sqrm', 'Distance_To_Hub_Meters']).copy()
 
+    df = df[df['Distance_To_Hub_Meters'] <= 4000]
+    df = df[(df['price_per_sqrm'] >= 15000) & (df['price_per_sqrm'] <= 55000)]
+
     # Define feature and target (X, y)
     X = df[['Distance_To_Hub_Meters']]
     y = df['price_per_sqrm']
@@ -28,13 +33,20 @@ def train_and_evaluate_model(file_path='final_analytical_dataset.csv'):
 
     # Initialize and train the decision tree regressor
     tree_model = DecisionTreeRegressor(
-        max_depth=4, min_samples_leaf=10, random_state=42)
+        max_depth=4, min_samples_leaf=40, random_state=42)
     tree_model.fit(X_train, y_train)
 
+    lr_model = LinearRegression()
+    lr_model.fit(X_train, y_train)
+
     # Predict on the test set and evaluate using RMSE
-    y_pred = tree_model.predict(X_test)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-    print(f"Model Evaluation Complete- Test RMSE: {rmse:.2f} ILS")
+    tree_pred = tree_model.predict(X_test)
+    lr_pred = lr_model.predict(X_test)
+    rmse_tree = np.sqrt(mean_squared_error(y_test, tree_pred))
+    rmse_lr = np.sqrt(mean_squared_error(y_test, lr_pred))
+    print(f"Tree Model Evaluation Complete- Test RMSE: {rmse_tree:.2f} ILS")
+    print(
+        f"Linear Regression Model Evaluation Complete- Test RMSE: {rmse_lr:.2f} ILS")
 
     print("Generating final visualization.")
     plt.figure(figsize=(10, 6))
@@ -47,9 +59,13 @@ def train_and_evaluate_model(file_path='final_analytical_dataset.csv'):
     ), X['Distance_To_Hub_Meters'].max(), 500).reshape(-1, 1)
 
     X_plot_df = pd.DataFrame(X_plot, columns=['Distance_To_Hub_Meters'])
-    y_plot = tree_model.predict(X_plot_df)
+    y_tree_plot = tree_model.predict(X_plot_df)
+    y_lr_plot = lr_model.predict(X_plot_df)
 
-    plt.plot(X_plot_df, y_plot, color='teal', linewidth=3,
+    plt.plot(X_plot_df, y_lr_plot, color='red', linestyle='--', linewidth=2,
+             label='Baseline: Linear Regression')
+
+    plt.plot(X_plot_df, y_tree_plot, color='teal', linewidth=3,
              label='Decision Tree Prediction')
 
     plt.title('Finding the Sweet Spot: Property Value vs. Distance to Transit Hub',
@@ -57,13 +73,41 @@ def train_and_evaluate_model(file_path='final_analytical_dataset.csv'):
     plt.xlabel('Distance to Nearest Busy Hub (Meters)', fontsize=12)
     plt.ylabel('Price per Square Meter (ILS)', fontsize=12)
     plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.xlim(0, 3000)
+    plt.ylim(df['price_per_sqrm'].min(), df['price_per_sqrm'].max())
 
-    plt.xlim(0, 4000)
+    plt.xlim(0, 3000)
 
-    plt.savefig('visualization_3.png', dpi=300, bbox_inches='tight')
+    plt.savefig('output/visualization_DecisionTree_Baseline.png',
+                dpi=300, bbox_inches='tight')
     plt.close()
-    print("Saved 'visualization_3.png'. The project pipeline is officially complete!")
+    print("Saved 'visualization_DecisionTree_Baseline.png'. The project pipeline is officially complete!")
+
+    print("Generating Boxplot visualization for deeper statistical insight")
+    plt.figure(figsize=(10, 6))
+
+    bins = [0, 350, 700, 1400, 1800, 3000]
+    labels = ['City Center\n(0-350m)',
+              'Transit Periphery\n(350-700m)',
+              'Mid Zone\n(700-1400m)',
+              'Luxury Peak\n(1.4-1.8km)',
+              'Transit Desert\n(1.8-3km)']
+    df['Distance_Zone'] = pd.cut(
+        df['Distance_To_Hub_Meters'], bins=bins, labels=labels)
+
+    sns.boxplot(x='Distance_Zone', y='price_per_sqrm', data=df,
+                hue='Distance_Zone', palette='Set2', legend=False)
+    plt.title('Statistical Distribution of Property Prices by Transit Distance Zones',
+              fontsize=14, fontweight='bold')
+    plt.xlabel('Geographical Zone', fontsize=12)
+    plt.ylabel('Price per Square Meter (ILS)', fontsize=12)
+    plt.grid(True, axis='y', linestyle='--', alpha=0.5)
+
+    plt.savefig('output/visualization_boxplot.png',
+                dpi=300, bbox_inches='tight')
+    plt.close()
+    print("Saved 'visualization_boxplot.png'.")
 
 
 def run_greedy_transit_optimization(file_path='final_analytical_dataset.csv', num_new_stations=3, coverage_radius_meters=800):
@@ -151,16 +195,41 @@ def run_greedy_transit_optimization(file_path='final_analytical_dataset.csv', nu
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.5)
 
-    plt.savefig('visualization_4.png', dpi=400, bbox_inches='tight')
+    plt.savefig('output/visualization_JerusalemNewStops.png',
+                dpi=400, bbox_inches='tight')
     plt.close()
 
     print("\nProof of Submodularity (Diminish Marginal Returns)")
     for i, count in enumerate(properties_covered_per_step):
         print(f"Station {i+1} added {count} to total coverage.")
 
-    print("Saved 'visualization_4.png'.")
+    print("Saved 'visualization_JerusalemNewStops.png'.")
+
+    print("\nGenerating Marginal Coverage Gain Bar Chart")
+    plt.figure(figsize=(8, 5))
+    stations_labels = [f'Station {i+1}' for i in range(num_new_stations)]
+
+    ax = sns.barplot(x=stations_labels, y=properties_covered_per_step,
+                     hue=stations_labels, palette='viridis', legend=False)
+
+    for i, v in enumerate(properties_covered_per_step):
+        ax.text(i, v + (max(properties_covered_per_step) * 0.02),
+                str(v), color='black', ha='center', fontweight='bold')
+
+    plt.title('Marginal Coverage Gain per New Transit Hub',
+              fontsize=14, fontweight='bold')
+    plt.xlabel('Greedy Algorithm Placement Step', fontsize=12)
+    plt.ylabel('New Properties Covered', fontsize=12)
+    plt.grid(True, axis='y', linestyle='--', alpha=0.5)
+
+    plt.savefig('output/visualization_coverage_bars.png',
+                dpi=300, bbox_inches='tight')
+    plt.close()
+    print("Saved 'visualization_coverage_bars.png'.")
 
 
 if __name__ == "__main__":
-    # train_and_evaluate_model()
+    if not os.path.exists('output'):
+        os.makedirs('output')
+    train_and_evaluate_model()
     run_greedy_transit_optimization()
